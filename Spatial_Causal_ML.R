@@ -1,0 +1,431 @@
+# =============================================================================
+# SPATIAL CAUSAL MACHINE LEARNING: THEORY AND AN APPLICATION USING CAUSAL FORESTS
+# Outcome:   Building permit density (BP2017_DEN)
+# Treatment: 606/Bloomingdale Trail access points — 3 specifications
+# Estimator: Causal Forest (grf), standard and spatially cross-validated
+# =============================================================================
+
+# =============================================================================
+# SECTION 0: SETUP
+# =============================================================================
+
+rm(list = ls())
+MASTER_SEED <- 12051984
+
+library(sf)
+library(spdep)
+library(grf)
+library(tidyverse)
+library(ggplot2)
+library(cowplot)
+library(leaflet)
+library(RColorBrewer)
+library(conflicted)
+
+has_leafsync <- requireNamespace("leafsync", quietly = TRUE)
+if (has_leafsync) library(leafsync)
+
+conflict_prefer("filter",    "dplyr")
+conflict_prefer("select",    "dplyr")
+conflict_prefer("lag",       "dplyr")
+conflict_prefer("mutate",    "dplyr")
+conflict_prefer("summarise", "dplyr")
+
+PROJECT_DIR <- "/Users/kevincredit/Library/CloudStorage/Dropbox/Packages/SArf paper/Book chapter/Spatial_Causal_ML/Spatial Causal ML"
+DATA_DIR    <- file.path(PROJECT_DIR, "data")
+OUTPUT_DIR  <- file.path(PROJECT_DIR, "outputs")
+setwd(PROJECT_DIR)
+
+cat("=== Setup complete. MASTER_SEED =", MASTER_SEED, "===\n\n")
+
+
+# =============================================================================
+# SECTION 1: DATA LOADING & PREPARATION
+# =============================================================================
+
+chicago_sf <- st_read(file.path(DATA_DIR, "Chicago_BGs_Covariates.shp"), quiet = TRUE)
+
+chicago_sf <- chicago_sf %>%
+  filter(!is.na(MEDAGE10), !is.na(PCIN10), !is.na(MHHIN10),
+         !is.na(MYRBLT10), !is.na(MYRMOV10))
+
+# Neighbourhood control area
+C_CAs <- chicago_sf %>% filter(TREAT == 1 | CONTR_1 == 1)
+C_CA  <- as.data.frame(C_CAs)
+
+cat("N =", nrow(C_CA), "| Treated:", sum(C_CA$TREAT),
+    "| Control:", sum(1 - C_CA$TREAT), "\n\n")
+
+
+# =============================================================================
+# SECTION 2: VARIABLE CONSTRUCTION
+# =============================================================================
+
+# --- Spatial weights & CV folds (built first — needed for lag covariate) ------
+coords <- st_coordinates(st_centroid(C_CAs))
+knn5   <- knn2nb(knearneigh(coords, k = 5))
+lw     <- nb2listw(knn5, style = "W")
+
+K_FOLDS <- 5
+set.seed(MASTER_SEED)
+km_fit   <- kmeans(coords, centers = K_FOLDS, nstart = 25)
+sp_folds <- km_fit$cluster
+
+cat("Spatial CV fold sizes:", table(sp_folds), "\n")
+
+# Map of spatial CV folds
+p_folds <- ggplot() +
+  geom_sf(data = C_CAs %>% mutate(fold = factor(sp_folds)),
+          aes(fill = fold), colour = "white", linewidth = 0.2) +
+  scale_fill_brewer(palette = "Set2", name = "Fold") +
+  labs(title = "Spatial Cross-Validation Folds (K = 5)",
+       subtitle = "K-means geographic blocks") +
+  theme_void(base_size = 11) +
+  theme(legend.position = "right")
+print(p_folds)
+
+# --- Outcome ------------------------------------------------------------------
+# Building permit densities (per km²)
+# Transform to UTM zone 16N (EPSG:32616, metres) for correct metric area
+bp_area_km2  <- as.numeric(st_area(st_transform(C_CAs, 32616))) / 1e6
+
+C_CA$BP2017_DEN <- C_CA$BP2017 / bp_area_km2
+C_CA$BP2010_DEN <- C_CA$BP2010 / bp_area_km2
+
+Y_bp_raw    <- C_CA$BP2017_DEN          # density, for mapping
+Y_bp        <- scale(Y_bp_raw)[, 1]     # standardised, for model
+Y_bp_density <- Y_bp_raw               # alias for map section
+
+# --- Covariates ---------------------------------------------------------------
+# Spatial lag of BP2010 density — SLX covariate.
+# NOTE: BP17_LAG (Wy for outcome year) intentionally excluded — bad control.
+C_CA$BP2010_DEN_LAG <- lag.listw(lw, C_CA$BP2010_DEN)
+
+cov_bp_base <- c("BP2010_DEN","MEDAGE10","BLKP10","BACHP10",
+                 "UNEMP10","MBSAP10","MHHIN10","OWNP10","MYRMOV10",
+                 "MYRBLT10","BIZ_ZONEP","SEBR2010")
+
+cov_bp_lag  <- c("BP2010_DEN_LAG","MEDA_LAG","BLKP_LAG","BACH_LAG",
+                 "UNEM_LAG","MBSA_LAG","MHHI_LAG","OWN_LAG","YRMV_LAG",
+                 "YRBT_LAG","BIZZ_LAG","RT_LAG10")
+
+X_bp_base <- as.matrix(scale(C_CA[, cov_bp_base]))
+X_bp_slx  <- as.matrix(scale(C_CA[, c(cov_bp_base, cov_bp_lag)]))
+colnames(X_bp_base) <- cov_bp_base
+colnames(X_bp_slx)  <- c(cov_bp_base, cov_bp_lag)
+
+cat("BP base covariates:", length(cov_bp_base),
+    "| SLX covariates:", length(c(cov_bp_base, cov_bp_lag)), "\n")
+
+# --- Treatment specifications -------------------------------------------------
+# (1) Binary T — do NOT scale for grf
+T_bin <- C_CA$TREAT
+
+# (2) T + WT combined — scaled for causal forest
+T_twt <- scale(C_CA$TREAT + C_CA$TREAT_LAG)[, 1]
+
+# (3) Logistic distance decay — scaled for causal forest
+T_dec <- scale(
+  1 - (1 / (exp((800/180) - (0.48/60) * ((C_CA$distance * 3600) / 5000)) + 1))
+)[, 1]
+
+cat("\n")
+
+
+# =============================================================================
+# SECTION 3: SPATIAL AUTOCORRELATION DIAGNOSTIC (MORAN'S I ON RAW Y)
+# =============================================================================
+# Pre-modelling question: does BP2017_DEN exhibit spatial autocorrelation?
+# Significant → SLX specification.
+
+mi_bp <- moran.test(C_CA$BP2017_DEN, lw)
+
+cat(sprintf("Moran's I on BP2017 density: statistic = %.4f,  p = %.4f\n",
+            mi_bp$statistic, mi_bp$p.value))
+
+if (mi_bp$p.value < 0.05) {
+  cat("=> Significant spatial autocorrelation. SLX specification suggested. \n\n")
+} else {
+  cat("=> No significant spatial autocorrelation. SLX recommended as robustness.\n\n")
+}
+
+
+# =============================================================================
+# SECTION 4: STANDARD CAUSAL FOREST — BUILDING PERMITS (3 SPECIFICATIONS)
+# =============================================================================
+# Doubly-robust causal forest via grf (Athey et al. 2019).
+# Nuisance functions Y.hat = E[Y|X] and W.hat = E[W|X] are estimated via
+# regression forests using grf's internal OOB cross-fitting, then passed
+# to causal_forest() which estimates tau(x) via the R-learner objective:
+#   (Y - Y.hat) = tau(X) * (W - W.hat) + epsilon
+
+cat("--- Section 4: Standard causal forest (building permits) ---\n")
+
+fit_causal_forest <- function(X, Y, W, label, seed) {
+  set.seed(seed)
+  nuisance_Y <- regression_forest(X, Y, seed = seed)
+  set.seed(seed + 1)
+  nuisance_W <- regression_forest(X, W, seed = seed + 1)
+
+  Y_hat <- predict(nuisance_Y)$predictions
+  W_hat <- predict(nuisance_W)$predictions
+
+  set.seed(seed + 2)
+  cf  <- causal_forest(X, Y, W, Y.hat = Y_hat, W.hat = W_hat, seed = seed + 2)
+  ate <- average_treatment_effect(cf, target.sample = "all")
+  tau <- predict(cf)$predictions
+
+  cat(sprintf("  [%s]: ATE = %.4f  SE = %.4f\n", label, ate[1], ate[2]))
+  list(model = cf, ate = ate, tau = tau, Y_hat = Y_hat, W_hat = W_hat, label = label)
+}
+
+bp_cf1 <- fit_causal_forest(X_bp_base, Y_bp, T_bin, "Binary T",       seed = 3001)
+bp_cf2 <- fit_causal_forest(X_bp_slx,  Y_bp, T_twt, "T+WT combined",  seed = 3002)
+bp_cf3 <- fit_causal_forest(X_bp_slx,  Y_bp, T_dec, "Distance decay", seed = 3003)
+
+cat("\n")
+
+
+# =============================================================================
+# SECTION 5: SPATIALLY CROSS-VALIDATED CAUSAL FOREST — BUILDING PERMITS
+# =============================================================================
+# Standard grf OOB cross-fitting holds out individual observations, not
+# geographic blocks. Under spatial autocorrelation, a unit's spatial neighbours
+# remain in its training set, allowing nuisance forests to exploit spatial
+# proximity — producing over-optimistic residuals (Y - Y.hat) and (W - W.hat).
+#
+# The spatial CV version uses K=5 geographic blocks (k-means on coordinates).
+# For each fold k, nuisance forests are trained on all blocks EXCEPT k, then
+# predict for held-out block k. This ensures no spatial neighbours of any
+# test unit appear in its nuisance training set.
+#
+# The spatially honest Y.hat and W.hat are then passed to causal_forest()
+# which is trained on the full data as usual.
+
+cat("--- Section 5: Spatially CV causal forest (building permits) ---\n")
+
+fit_causal_forest_spcv <- function(X, Y, W, folds, label, seed) {
+  n     <- nrow(X)
+  K     <- max(folds)
+  Y_hat <- numeric(n)
+  W_hat <- numeric(n)
+
+  for (k in seq_len(K)) {
+    train_idx <- which(folds != k)
+    test_idx  <- which(folds == k)
+
+    set.seed(seed + k)
+    rf_Y_k <- regression_forest(X[train_idx, , drop = FALSE], Y[train_idx], seed = seed + k)
+    set.seed(seed + k + K)
+    rf_W_k <- regression_forest(X[train_idx, , drop = FALSE], W[train_idx], seed = seed + k + K)
+
+    Y_hat[test_idx] <- predict(rf_Y_k, newdata = X[test_idx, , drop = FALSE])$predictions
+    W_hat[test_idx] <- predict(rf_W_k, newdata = X[test_idx, , drop = FALSE])$predictions
+  }
+
+  set.seed(seed + 2 * K)
+  cf  <- causal_forest(X, Y, W, Y.hat = Y_hat, W.hat = W_hat, seed = seed + 2 * K)
+  ate <- average_treatment_effect(cf, target.sample = "all")
+  tau <- predict(cf)$predictions
+
+  cat(sprintf("  [%s]: ATE = %.4f  SE = %.4f\n", label, ate[1], ate[2]))
+  list(model = cf, ate = ate, tau = tau, label = paste0(label, " [Spatial CV]"))
+}
+
+bp_scf1 <- fit_causal_forest_spcv(X_bp_base, Y_bp, T_bin, sp_folds, "Binary T",       seed = 4001)
+bp_scf2 <- fit_causal_forest_spcv(X_bp_slx,  Y_bp, T_twt, sp_folds, "T+WT combined",  seed = 4002)
+bp_scf3 <- fit_causal_forest_spcv(X_bp_slx,  Y_bp, T_dec, sp_folds, "Distance decay", seed = 4003)
+
+cat("\n")
+
+
+# =============================================================================
+# SECTION 6: ATE COMPARISON PLOT — BUILDING PERMITS
+# =============================================================================
+
+cat("--- Section 6: ATE comparison plot ---\n")
+
+spec_levels <- c("Binary T", "T+WT\ncombined", "Distance\ndecay")
+
+build_ate_row <- function(obj, cv, spec_idx) {
+  data.frame(
+    label    = obj$label,
+    estimate = obj$ate[["estimate"]],
+    std.err  = obj$ate[["std.err"]],
+    cv       = cv,
+    spec     = factor(spec_levels[spec_idx], levels = spec_levels),
+    stringsAsFactors = FALSE
+  )
+}
+
+ate_bp_df <- rbind(
+  build_ate_row(bp_cf1,  "Standard",   1),
+  build_ate_row(bp_cf2,  "Standard",   2),
+  build_ate_row(bp_cf3,  "Standard",   3),
+  build_ate_row(bp_scf1, "Spatial CV", 1),
+  build_ate_row(bp_scf2, "Spatial CV", 2),
+  build_ate_row(bp_scf3, "Spatial CV", 3)
+)
+
+p_ate_bp <- ggplot(ate_bp_df, aes(x = spec, y = estimate, colour = cv, shape = cv)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_errorbar(aes(ymin = estimate - 1.96 * std.err,
+                    ymax = estimate + 1.96 * std.err),
+                width = 0.15, linewidth = 0.8,
+                position = position_dodge(width = 0.5)) +
+  geom_point(size = 3.5, position = position_dodge(width = 0.5)) +
+  scale_colour_manual(values = c("Standard" = "#D6604D", "Spatial CV" = "#2166AC"),
+                      name = "Nuisance estimation") +
+  scale_shape_manual(values = c("Standard" = 16, "Spatial CV" = 17),
+                     name = "Nuisance estimation") +
+  labs(title = "Causal Forest ATE by Treatment Specification",
+       subtitle = "Standard (OOB) vs Spatially Cross-Validated Nuisance Estimation",
+       x = "Treatment specification", y = "ATE (standardised building permit density)",
+       caption = "Error bars = 95% CI") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom",
+        panel.grid.major.x = element_blank())
+
+print(p_ate_bp)
+cat("ATE plot printed.\n\n")
+
+
+# =============================================================================
+# SECTION 7: DEEP DIVE — SPATIAL CV DISTANCE DECAY MODEL
+# =============================================================================
+# Primary model: spatial CV causal forest with distance decay treatment (bp_scf3).
+# Spatial CV nuisance estimation addresses spatial leakage in the OOB stage.
+
+cat("--- Section 7: Spatial CV distance decay model deep dive ---\n")
+
+best_bp_cf  <- bp_scf3
+tau_bp_best <- best_bp_cf$tau
+cat("Model:", best_bp_cf$label, "\n\n")
+
+
+# ---- 7a. Permutation Variable Importance ------------------------------------
+cat("--- 7a. Variable importance ---\n")
+
+vi_bp_df <- data.frame(
+  variable   = colnames(best_bp_cf$model$X.orig),
+  importance = as.numeric(variable_importance(best_bp_cf$model))
+) %>% arrange(desc(importance))
+
+cat("Top 10 variables:\n")
+print(head(vi_bp_df, 10), row.names = FALSE)
+
+p_vi_bp <- ggplot(vi_bp_df, aes(x = reorder(variable, importance), y = importance)) +
+  geom_col(fill = "#4DAC26") +
+  coord_flip() +
+  labs(title = paste("Variable Importance —", best_bp_cf$label),
+       x = NULL, y = "Permutation importance") +
+  theme_minimal(base_size = 11)
+print(p_vi_bp)
+
+
+# ---- 7b. CATE Heterogeneity Plots -------------------------------------------
+cat("\n--- 7b. CATE heterogeneity ---\n")
+
+# Top 5 non-lag variables by importance + distance = 6 panels
+top5_base_vars <- vi_bp_df %>%
+  filter(!grepl("_LAG$", variable)) %>%
+  head(5) %>%
+  pull(variable)
+het_bp_vars   <- c(top5_base_vars, "distance")
+het_bp_labels <- ifelse(het_bp_vars == "distance", "DIST (distance to trail access points)", het_bp_vars)
+
+het_bp_plots <- mapply(function(v, lbl) {
+  ggplot(data.frame(x = C_CA[[v]], tau = tau_bp_best), aes(x = x, y = tau)) +
+    geom_point(alpha = 0.35, size = 0.8, colour = "#666666") +
+    geom_smooth(method = "loess", se = TRUE, colour = "#4DAC26", fill = "#B8E186") +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    coord_cartesian(ylim = c(0.25, 0.45)) +
+    labs(title = lbl, x = lbl, y = expression(hat(tau))) +
+    theme_minimal(base_size = 9)
+}, het_bp_vars, het_bp_labels, SIMPLIFY = FALSE)
+
+print(cowplot::plot_grid(plotlist = het_bp_plots, ncol = 2))
+
+
+# ---- 7c. Best Linear Projection ---------------------------------------------
+cat("\n--- 7c. Best linear projection ---\n")
+print(best_linear_projection(best_bp_cf$model, X_bp_slx))
+
+
+# ---- 7d. Calibration Test ---------------------------------------------------
+cat("\n--- 7d. Calibration test ---\n")
+print(test_calibration(best_bp_cf$model))
+
+
+# ---- 7e. Leaflet Maps (CATE and building permit density) --------------------
+cat("\n--- 7e. Leaflet maps ---\n")
+
+C_CAs_wgs                <- st_transform(C_CAs, crs = 4326)
+C_CAs_wgs$tau_bp_best    <- tau_bp_best
+C_CAs_wgs$Y_bp_density   <- Y_bp_density
+
+# SD-based breaks: mean ± 0.5, 1, 1.5 SD, clipped to actual data range
+make_sd_breaks <- function(x, n_sd = 3, step = 0.5) {
+  m <- mean(x, na.rm = TRUE); s <- sd(x, na.rm = TRUE)
+  brks <- m + seq(-n_sd, n_sd, by = step) * s
+  brks <- brks[brks >= min(x, na.rm = TRUE) & brks <= max(x, na.rm = TRUE)]
+  unique(c(min(x, na.rm = TRUE), brks, max(x, na.rm = TRUE)))
+}
+
+# CATE: sequential blues, SD breaks
+tau_breaks  <- make_sd_breaks(tau_bp_best)
+pal_bp_cate <- colorBin("YlOrRd", domain = tau_bp_best, bins = tau_breaks)
+
+# Density: YlGn, SD breaks (floor negative breaks at 0)
+dens_breaks <- pmax(0, make_sd_breaks(Y_bp_density))
+dens_breaks <- unique(dens_breaks)
+pal_bp_dens <- colorBin("YlGn", domain = Y_bp_density, bins = dens_breaks)
+
+map_bp_cate <- leaflet(C_CAs_wgs) %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addPolygons(fillColor = ~pal_bp_cate(tau_bp_best), fillOpacity = 0.5,
+              weight = 0.5, color = "#FFFFFF",
+              popup = ~paste0("CATE: ", round(tau_bp_best, 3))) %>%
+  addLegend("bottomright", pal = pal_bp_cate, values = ~tau_bp_best,
+            labFormat = labelFormat(digits = 2),
+            title = "CATE (std.)", opacity = 0.9)
+
+map_bp_dens <- leaflet(C_CAs_wgs) %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addPolygons(fillColor = ~pal_bp_dens(Y_bp_density), fillOpacity = 0.5,
+              weight = 0.5, color = "#FFFFFF",
+              popup = ~paste0("BP density (per km²): ", round(Y_bp_density, 1))) %>%
+  addLegend("bottomright", pal = pal_bp_dens, values = ~Y_bp_density,
+            labFormat = labelFormat(digits = 1),
+            title = "Building permits\nper km² (2017)", opacity = 0.9)
+
+if (has_leafsync) leafsync::sync(map_bp_cate, map_bp_dens) else {
+  print(map_bp_cate)
+  print(map_bp_dens)
+}
+
+
+# =============================================================================
+# SECTION 8: SAVE OUTPUTS
+# =============================================================================
+
+output_sf <- C_CAs %>%
+  mutate(
+    tau_bp_cf_bin  = bp_cf1$tau,
+    tau_bp_cf_twt  = bp_cf2$tau,
+    tau_bp_cf_dec  = bp_cf3$tau,
+    tau_bp_scf_bin = bp_scf1$tau,
+    tau_bp_scf_twt = bp_scf2$tau,
+    tau_bp_scf_dec = bp_scf3$tau,
+    tau_bp_best    = tau_bp_best,
+    bp_density     = Y_bp_density
+  )
+
+st_write(output_sf, file.path(OUTPUT_DIR, "Chicago_CausalML_BP_Results.shp"), delete_dsn = TRUE)
+
+cat("\n=====================================================\n")
+cat("Script complete — Building permits application.\n")
+cat("  Standard CF:    bp_cf1 (Binary T), bp_cf2 (T+WT), bp_cf3 (Distance decay)\n")
+cat("  Spatial CV CF:  bp_scf1, bp_scf2, bp_scf3\n")
+cat("  Deep dive:      Spatial CV distance decay (bp_scf3)\n")
+cat("=====================================================\n")
