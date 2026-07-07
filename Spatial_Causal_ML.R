@@ -1,6 +1,6 @@
 # =============================================================================
 # SPATIAL CAUSAL MACHINE LEARNING: THEORY AND AN APPLICATION USING CAUSAL FORESTS
-# Outcome:   Building permit density (BP2017_DEN)
+# Outcome:   Building permit density (BP_POST_DEN, cumulative 2015–2019)
 # Treatment: 606/Bloomingdale Trail access points — 3 specifications
 # Estimator: Causal Forest (grf), standard and spatially cross-validated
 # =============================================================================
@@ -89,23 +89,25 @@ print(p_folds)
 # Transform to UTM zone 16N (EPSG:32616, metres) for correct metric area
 bp_area_km2  <- as.numeric(st_area(st_transform(C_CAs, 32616))) / 1e6
 
-C_CA$BP2017_DEN <- C_CA$BP2017 / bp_area_km2
-C_CA$BP2010_DEN <- C_CA$BP2010 / bp_area_km2
+# Pre-intervention: cumulative permits 2010–2014 (before 606 construction)
+# Post-intervention: cumulative permits 2015–2019 (construction + early effects)
+C_CA$BP_PRE_DEN  <- rowSums(C_CA[, paste0("BP", 2010:2014)]) / bp_area_km2
+C_CA$BP_POST_DEN <- rowSums(C_CA[, paste0("BP", 2015:2019)]) / bp_area_km2
 
-Y_bp_raw    <- C_CA$BP2017_DEN          # density, for mapping
-Y_bp        <- scale(Y_bp_raw)[, 1]     # standardised, for model
-Y_bp_density <- Y_bp_raw               # alias for map section
+Y_bp_raw     <- C_CA$BP_POST_DEN         # density, for mapping
+Y_bp         <- scale(Y_bp_raw)[, 1]     # standardised, for model
+Y_bp_density <- Y_bp_raw                 # alias for map section
 
 # --- Covariates ---------------------------------------------------------------
-# Spatial lag of BP2010 density — SLX covariate.
-# NOTE: BP17_LAG (Wy for outcome year) intentionally excluded — bad control.
-C_CA$BP2010_DEN_LAG <- lag.listw(lw, C_CA$BP2010_DEN)
+# Spatial lag of pre-intervention BP density — SLX covariate.
+# NOTE: spatial lag of post-intervention outcome intentionally excluded — bad control.
+C_CA$BP_PRE_DEN_LAG <- lag.listw(lw, C_CA$BP_PRE_DEN)
 
-cov_bp_base <- c("BP2010_DEN","MEDAGE10","BLKP10","BACHP10",
+cov_bp_base <- c("BP_PRE_DEN","MEDAGE10","BLKP10","BACHP10",
                  "UNEMP10","MBSAP10","MHHIN10","OWNP10","MYRMOV10",
                  "MYRBLT10","BIZ_ZONEP","SEBR2010")
 
-cov_bp_lag  <- c("BP2010_DEN_LAG","MEDA_LAG","BLKP_LAG","BACH_LAG",
+cov_bp_lag  <- c("BP_PRE_DEN_LAG","MEDA_LAG","BLKP_LAG","BACH_LAG",
                  "UNEM_LAG","MBSA_LAG","MHHI_LAG","OWN_LAG","YRMV_LAG",
                  "YRBT_LAG","BIZZ_LAG","RT_LAG10")
 
@@ -135,12 +137,12 @@ cat("\n")
 # =============================================================================
 # SECTION 3: SPATIAL AUTOCORRELATION DIAGNOSTIC (MORAN'S I ON RAW Y)
 # =============================================================================
-# Pre-modelling question: does BP2017_DEN exhibit spatial autocorrelation?
+# Pre-modelling question: does BP_POST_DEN exhibit spatial autocorrelation?
 # Significant → SLX specification.
 
-mi_bp <- moran.test(C_CA$BP2017_DEN, lw)
+mi_bp <- moran.test(C_CA$BP_POST_DEN, lw)
 
-cat(sprintf("Moran's I on BP2017 density: statistic = %.4f,  p = %.4f\n",
+cat(sprintf("Moran's I on BP_POST_DEN (2015-2019): statistic = %.4f,  p = %.4f\n",
             mi_bp$statistic, mi_bp$p.value))
 
 if (mi_bp$p.value < 0.05) {
@@ -326,25 +328,44 @@ print(p_vi_bp)
 # ---- 7b. CATE Heterogeneity Plots -------------------------------------------
 cat("\n--- 7b. CATE heterogeneity ---\n")
 
-# Top 5 non-lag variables by importance + distance = 6 panels
-top5_base_vars <- vi_bp_df %>%
-  filter(!grepl("_LAG$", variable)) %>%
-  head(5) %>%
+# Top 5 variables by importance + distance = 6 panels.
+# For each base/lag pair, keep whichever ranks higher; drop the other.
+vi_ranked <- vi_bp_df %>% mutate(rank = row_number())
+
+vars_to_drop <- character(0)
+for (i in seq_along(cov_bp_base)) {
+  base_var  <- cov_bp_base[i]
+  lag_var   <- cov_bp_lag[i]
+  rank_base <- vi_ranked$rank[vi_ranked$variable == base_var]
+  rank_lag  <- vi_ranked$rank[vi_ranked$variable == lag_var]
+  if (length(rank_base) == 0) rank_base <- Inf
+  if (length(rank_lag)  == 0) rank_lag  <- Inf
+  # Drop whichever in the pair ranks lower (higher rank number = less important)
+  vars_to_drop <- c(vars_to_drop,
+                    if (rank_lag < rank_base) base_var else lag_var)
+}
+
+top7_vars   <- vi_bp_df %>%
+  filter(!variable %in% vars_to_drop) %>%
+  head(7) %>%
   pull(variable)
-het_bp_vars   <- c(top5_base_vars, "distance")
+het_bp_vars   <- c(top7_vars, "distance")
 het_bp_labels <- ifelse(het_bp_vars == "distance", "DIST (distance to trail access points)", het_bp_vars)
+
+tau_ylim <- range(tau_bp_best, na.rm = TRUE) +
+  c(-1, 1) * diff(range(tau_bp_best, na.rm = TRUE)) * 0.05
 
 het_bp_plots <- mapply(function(v, lbl) {
   ggplot(data.frame(x = C_CA[[v]], tau = tau_bp_best), aes(x = x, y = tau)) +
     geom_point(alpha = 0.35, size = 0.8, colour = "#666666") +
-    geom_smooth(method = "loess", se = TRUE, colour = "#4DAC26", fill = "#B8E186") +
+    geom_smooth(method = "lm", se = TRUE, colour = "#4DAC26", fill = "#B8E186") +
     geom_hline(yintercept = 0, linetype = "dashed") +
-    coord_cartesian(ylim = c(0.25, 0.45)) +
+    coord_cartesian(ylim = tau_ylim) +
     labs(title = lbl, x = lbl, y = expression(hat(tau))) +
     theme_minimal(base_size = 9)
 }, het_bp_vars, het_bp_labels, SIMPLIFY = FALSE)
 
-print(cowplot::plot_grid(plotlist = het_bp_plots, ncol = 2))
+print(cowplot::plot_grid(plotlist = het_bp_plots, ncol = 4))
 
 
 # ---- 7c. Best Linear Projection ---------------------------------------------
@@ -397,7 +418,7 @@ map_bp_dens <- leaflet(C_CAs_wgs) %>%
               popup = ~paste0("BP density (per km²): ", round(Y_bp_density, 1))) %>%
   addLegend("bottomright", pal = pal_bp_dens, values = ~Y_bp_density,
             labFormat = labelFormat(digits = 1),
-            title = "Building permits\nper km² (2017)", opacity = 0.9)
+            title = "Building permits\nper km² (2015–2019)", opacity = 0.9)
 
 if (has_leafsync) leafsync::sync(map_bp_cate, map_bp_dens) else {
   print(map_bp_cate)
