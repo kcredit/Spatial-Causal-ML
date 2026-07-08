@@ -83,6 +83,8 @@ p_folds <- ggplot() +
   theme_void(base_size = 11) +
   theme(legend.position = "right")
 print(p_folds)
+ggsave(file.path(OUTPUT_DIR, "p_folds.png"), plot = p_folds,
+       width = 7, height = 6, dpi = 300, bg = "white")
 
 # --- Outcome ------------------------------------------------------------------
 # Building permit densities (per km²)
@@ -99,9 +101,10 @@ Y_bp         <- scale(Y_bp_raw)[, 1]     # standardised, for model
 Y_bp_density <- Y_bp_raw                 # alias for map section
 
 # --- Covariates ---------------------------------------------------------------
-# Spatial lag of pre-intervention BP density — SLX covariate.
+# All spatial lags computed in-script using knn5 weights matrix (k = 5 nearest
+# neighbours, row-standardised). Overrides any pre-computed lag columns from the
+# shapefile so that lag specification is consistent and transparent.
 # NOTE: spatial lag of post-intervention outcome intentionally excluded — bad control.
-C_CA$BP_PRE_DEN_LAG <- lag.listw(lw, C_CA$BP_PRE_DEN)
 
 cov_bp_base <- c("BP_PRE_DEN","MEDAGE10","BLKP10","BACHP10",
                  "UNEMP10","MBSAP10","MHHIN10","OWNP10","MYRMOV10",
@@ -110,6 +113,10 @@ cov_bp_base <- c("BP_PRE_DEN","MEDAGE10","BLKP10","BACHP10",
 cov_bp_lag  <- c("BP_PRE_DEN_LAG","MEDA_LAG","BLKP_LAG","BACH_LAG",
                  "UNEM_LAG","MBSA_LAG","MHHI_LAG","OWN_LAG","YRMV_LAG",
                  "YRBT_LAG","BIZZ_LAG","RT_LAG10")
+
+for (i in seq_along(cov_bp_base)) {
+  C_CA[[cov_bp_lag[i]]] <- lag.listw(lw, C_CA[[cov_bp_base[i]]])
+}
 
 X_bp_base <- as.matrix(scale(C_CA[, cov_bp_base]))
 X_bp_slx  <- as.matrix(scale(C_CA[, c(cov_bp_base, cov_bp_lag)]))
@@ -289,6 +296,8 @@ p_ate_bp <- ggplot(ate_bp_df, aes(x = spec, y = estimate, colour = cv, shape = c
         panel.grid.major.x = element_blank())
 
 print(p_ate_bp)
+ggsave(file.path(OUTPUT_DIR, "p_ate_bp.png"), plot = p_ate_bp,
+       width = 8, height = 5, dpi = 300, bg = "white")
 cat("ATE plot printed.\n\n")
 
 
@@ -323,6 +332,8 @@ p_vi_bp <- ggplot(vi_bp_df, aes(x = reorder(variable, importance), y = importanc
        x = NULL, y = "Permutation importance") +
   theme_minimal(base_size = 11)
 print(p_vi_bp)
+ggsave(file.path(OUTPUT_DIR, "p_vi_bp.png"), plot = p_vi_bp,
+       width = 7, height = 5, dpi = 300, bg = "white")
 
 
 # ---- 7b. CATE Heterogeneity Plots -------------------------------------------
@@ -365,7 +376,10 @@ het_bp_plots <- mapply(function(v, lbl) {
     theme_minimal(base_size = 9)
 }, het_bp_vars, het_bp_labels, SIMPLIFY = FALSE)
 
-print(cowplot::plot_grid(plotlist = het_bp_plots, ncol = 4))
+p_het_bp <- cowplot::plot_grid(plotlist = het_bp_plots, ncol = 4)
+print(p_het_bp)
+ggsave(file.path(OUTPUT_DIR, "p_het_bp.png"), plot = p_het_bp,
+       width = 14, height = 6, dpi = 300, bg = "white")
 
 
 # ---- 7c. Best Linear Projection ---------------------------------------------
