@@ -106,13 +106,11 @@ Y_bp_density <- Y_bp_raw                 # alias for map section
 # shapefile so that lag specification is consistent and transparent.
 # NOTE: spatial lag of post-intervention outcome intentionally excluded — bad control.
 
-cov_bp_base <- c("BP_PRE_DEN","MEDAGE10","BLKP10","BACHP10",
-                 "UNEMP10","MBSAP10","MHHIN10","OWNP10","MYRMOV10",
-                 "MYRBLT10","BIZ_ZONEP","SEBR2010")
+cov_bp_base <- c("BP_PRE_DEN","BIZ_ZONEP","MEDAGE10","BLKP10","HSPP10",
+                 "BACHP10","UNEMP10","MBSAP10","MHHIN10","OWNP10","MYRMOV10")
 
-cov_bp_lag  <- c("BP_PRE_DEN_LAG","MEDA_LAG","BLKP_LAG","BACH_LAG",
-                 "UNEM_LAG","MBSA_LAG","MHHI_LAG","OWN_LAG","YRMV_LAG",
-                 "YRBT_LAG","BIZZ_LAG","RT_LAG10")
+cov_bp_lag  <- c("BP_PRE_DEN_LAG","BIZZ_LAG","MEDA_LAG","BLKP_LAG","HSPP_LAG",
+                 "BACH_LAG","UNEM_LAG","MBSA_LAG","MHHI_LAG","OWN_LAG","YRMV_LAG")
 
 for (i in seq_along(cov_bp_base)) {
   C_CA[[cov_bp_lag[i]]] <- lag.listw(lw, C_CA[[cov_bp_base[i]]])
@@ -399,25 +397,9 @@ ggsave(file.path(OUTPUT_DIR, "p_vi_bp.png"), plot = p_vi_bp,
 # ---- 7b. CATE Heterogeneity Plots -------------------------------------------
 cat("\n--- 7b. CATE heterogeneity ---\n")
 
-# Top 5 variables by importance + distance = 6 panels.
-# For each base/lag pair, keep whichever ranks higher; drop the other.
-vi_ranked <- vi_bp_df %>% mutate(rank = row_number())
-
-vars_to_drop <- character(0)
-for (i in seq_along(cov_bp_base)) {
-  base_var  <- cov_bp_base[i]
-  lag_var   <- cov_bp_lag[i]
-  rank_base <- vi_ranked$rank[vi_ranked$variable == base_var]
-  rank_lag  <- vi_ranked$rank[vi_ranked$variable == lag_var]
-  if (length(rank_base) == 0) rank_base <- Inf
-  if (length(rank_lag)  == 0) rank_lag  <- Inf
-  # Drop whichever in the pair ranks lower (higher rank number = less important)
-  vars_to_drop <- c(vars_to_drop,
-                    if (rank_lag < rank_base) base_var else lag_var)
-}
-
+# Top 7 non-lag variables by importance + distance = 8 panels.
 top7_vars   <- vi_bp_df %>%
-  filter(!variable %in% vars_to_drop) %>%
+  filter(!grepl("_LAG$", variable)) %>%
   head(7) %>%
   pull(variable)
 het_bp_vars   <- c(top7_vars, "distance")
