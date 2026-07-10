@@ -141,6 +141,66 @@ T_dec <- scale(
 cat("\n")
 
 
+# ── Treatment specification shape plot (actual data) ─────────────────────────
+T_bin_raw <- C_CA$TREAT
+T_twt_raw <- (C_CA$TREAT + C_CA$TREAT_LAG) /
+              max(C_CA$TREAT + C_CA$TREAT_LAG, na.rm = TRUE)
+T_dec_raw <- 1 - (1 / (exp((800/180) -
+              (0.48/60) * ((C_CA$distance * 3600) / 5000)) + 1))
+
+# Smooth logistic line over actual distance range
+dist_seq   <- seq(min(C_CA$distance), max(C_CA$distance), length.out = 500)
+logit_line <- data.frame(
+  distance = dist_seq,
+  value    = 1 - (1 / (exp((800/180) -
+               (0.48/60) * ((dist_seq * 3600) / 5000)) + 1)),
+  spec     = "(3) Logistic decay"
+)
+
+shape_df <- data.frame(
+  distance = rep(C_CA$distance, 3),
+  value    = c(T_bin_raw, T_twt_raw, T_dec_raw),
+  spec     = factor(
+    rep(c("(1) Binary", "(2) T + WT (norm.)", "(3) Logistic decay"),
+        each = nrow(C_CA)),
+    levels = c("(1) Binary", "(2) T + WT (norm.)", "(3) Logistic decay"))
+)
+
+spec_cols <- c("(1) Binary"         = "#08519C",
+               "(2) T + WT (norm.)" = "#6BAED6",
+               "(3) Logistic decay" = "#238B45")
+
+p_treat_shape <- ggplot(shape_df,
+                        aes(x = distance, y = value, colour = spec)) +
+  geom_jitter(height = 0.015, width = 0, alpha = 0.5, size = 1.2) +
+  # Binary: sharp step line
+  geom_step(data = shape_df %>% dplyr::filter(spec == "(1) Binary") %>%
+                   dplyr::arrange(distance),
+            aes(x = distance, y = value),
+            colour = "#08519C", linewidth = 1.0, inherit.aes = FALSE) +
+  # T + WT: loess smooth
+  geom_smooth(data = shape_df %>% dplyr::filter(spec == "(2) T + WT (norm.)"),
+              aes(x = distance, y = value),
+              method = "loess", se = FALSE,
+              colour = "#6BAED6", linewidth = 1.0, inherit.aes = FALSE) +
+  # Logistic decay: exact formula curve
+  geom_line(data = logit_line, aes(x = distance, y = value),
+            colour = "#238B45", linewidth = 1.1, inherit.aes = FALSE) +
+  scale_colour_manual(values = spec_cols, name = NULL) +
+  scale_y_continuous(limits = c(-0.05, 1.1),
+                     breaks = c(0, 0.25, 0.5, 0.75, 1)) +
+  labs(x = "Distance from access points (m)",
+       y = "Treatment intensity (0–1)",
+       title = "Treatment specification shapes") +
+  theme_minimal(base_size = 10) +
+  theme(legend.position  = "bottom",
+        plot.background  = element_rect(fill = "white", colour = NA))
+
+print(p_treat_shape)
+ggsave(file.path(OUTPUT_DIR, "p_treat_shape.png"), plot = p_treat_shape,
+       width = 6, height = 4, dpi = 300, bg = "white")
+
+
 # =============================================================================
 # SECTION 3: SPATIAL AUTOCORRELATION DIAGNOSTIC (MORAN'S I ON RAW Y)
 # =============================================================================
