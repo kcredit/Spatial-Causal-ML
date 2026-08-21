@@ -139,7 +139,7 @@ T_dec <- scale(
 cat("\n")
 
 
-# ── Treatment specification shape plot (actual data) ─────────────────────────
+# --- Treatment specification shape plot (actual data) -------------------------------------------------
 T_bin_raw <- C_CA$TREAT
 T_twt_raw <- (C_CA$TREAT + C_CA$TREAT_LAG) /
               max(C_CA$TREAT + C_CA$TREAT_LAG, na.rm = TRUE)
@@ -231,14 +231,14 @@ cat("--- Section 4: Standard causal forest (building permits) ---\n")
 fit_causal_forest <- function(X, Y, W, label, seed) {
   set.seed(seed)
   nuisance_Y <- regression_forest(X, Y, seed = seed)
-  set.seed(seed + 1)
-  nuisance_W <- regression_forest(X, W, seed = seed + 1)
+  set.seed(seed)
+  nuisance_W <- regression_forest(X, W, seed = seed)
 
   Y_hat <- predict(nuisance_Y)$predictions
   W_hat <- predict(nuisance_W)$predictions
 
-  set.seed(seed + 2)
-  cf  <- causal_forest(X, Y, W, Y.hat = Y_hat, W.hat = W_hat, seed = seed + 2)
+  set.seed(seed)
+  cf  <- causal_forest(X, Y, W, Y.hat = Y_hat, W.hat = W_hat, seed = seed)
   ate <- average_treatment_effect(cf, target.sample = "all")
   tau <- predict(cf)$predictions
 
@@ -246,9 +246,9 @@ fit_causal_forest <- function(X, Y, W, label, seed) {
   list(model = cf, ate = ate, tau = tau, Y_hat = Y_hat, W_hat = W_hat, label = label)
 }
 
-bp_cf1 <- fit_causal_forest(X_bp_base, Y_bp, T_bin, "Binary T",       seed = 3001)
-bp_cf2 <- fit_causal_forest(X_bp_slx,  Y_bp, T_twt, "T+WT combined",  seed = 3002)
-bp_cf3 <- fit_causal_forest(X_bp_slx,  Y_bp, T_dec, "Distance decay", seed = 3003)
+bp_cf1 <- fit_causal_forest(X_bp_slx, Y_bp, T_bin, "Binary T",       seed = MASTER_SEED)
+bp_cf2 <- fit_causal_forest(X_bp_slx,  Y_bp, T_twt, "T+WT combined",  seed = MASTER_SEED)
+bp_cf3 <- fit_causal_forest(X_bp_slx,  Y_bp, T_dec, "Distance decay", seed = MASTER_SEED)
 
 cat("\n")
 
@@ -281,17 +281,17 @@ fit_causal_forest_spcv <- function(X, Y, W, folds, label, seed) {
     train_idx <- which(folds != k)
     test_idx  <- which(folds == k)
 
-    set.seed(seed + k)
-    rf_Y_k <- regression_forest(X[train_idx, , drop = FALSE], Y[train_idx], seed = seed + k)
-    set.seed(seed + k + K)
-    rf_W_k <- regression_forest(X[train_idx, , drop = FALSE], W[train_idx], seed = seed + k + K)
+    set.seed(seed)
+    rf_Y_k <- regression_forest(X[train_idx, , drop = FALSE], Y[train_idx], seed = seed)
+    set.seed(seed)
+    rf_W_k <- regression_forest(X[train_idx, , drop = FALSE], W[train_idx], seed = seed)
 
     Y_hat[test_idx] <- predict(rf_Y_k, newdata = X[test_idx, , drop = FALSE])$predictions
     W_hat[test_idx] <- predict(rf_W_k, newdata = X[test_idx, , drop = FALSE])$predictions
   }
 
-  set.seed(seed + 2 * K)
-  cf  <- causal_forest(X, Y, W, Y.hat = Y_hat, W.hat = W_hat, seed = seed + 2 * K)
+  set.seed(seed)
+  cf  <- causal_forest(X, Y, W, Y.hat = Y_hat, W.hat = W_hat, seed = seed)
   ate <- average_treatment_effect(cf, target.sample = "all")
   tau <- predict(cf)$predictions
 
@@ -299,9 +299,9 @@ fit_causal_forest_spcv <- function(X, Y, W, folds, label, seed) {
   list(model = cf, ate = ate, tau = tau, label = paste0(label, " [Spatial CV]"))
 }
 
-bp_scf1 <- fit_causal_forest_spcv(X_bp_base, Y_bp, T_bin, sp_folds, "Binary T",       seed = 4001)
-bp_scf2 <- fit_causal_forest_spcv(X_bp_slx,  Y_bp, T_twt, sp_folds, "T+WT combined",  seed = 4002)
-bp_scf3 <- fit_causal_forest_spcv(X_bp_slx,  Y_bp, T_dec, sp_folds, "Distance decay", seed = 4003)
+bp_scf1 <- fit_causal_forest_spcv(X_bp_slx, Y_bp, T_bin, sp_folds, "Binary T",       seed = MASTER_SEED)
+bp_scf2 <- fit_causal_forest_spcv(X_bp_slx,  Y_bp, T_twt, sp_folds, "T+WT combined",  seed = MASTER_SEED)
+bp_scf3 <- fit_causal_forest_spcv(X_bp_slx,  Y_bp, T_dec, sp_folds, "Distance decay", seed = MASTER_SEED)
 
 cat("\n")
 
