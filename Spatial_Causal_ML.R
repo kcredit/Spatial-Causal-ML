@@ -372,7 +372,7 @@ tau_bp_best <- best_bp_cf$tau
 cat("Model:", best_bp_cf$label, "\n\n")
 
 
-# ---- 7a. Permutation Variable Importance ------------------------------------
+# ---- 7a. Variable Importance ------------------------------------
 cat("--- 7a. Variable importance ---\n")
 
 vi_bp_df <- data.frame(
@@ -387,7 +387,7 @@ p_vi_bp <- ggplot(vi_bp_df, aes(x = reorder(variable, importance), y = importanc
   geom_col(fill = "#4DAC26") +
   coord_flip() +
   labs(title = paste("Variable Importance —", best_bp_cf$label),
-       x = NULL, y = "Permutation importance") +
+       x = NULL, y = "Variable importance") +
   theme_minimal(base_size = 11)
 print(p_vi_bp)
 ggsave(file.path(OUTPUT_DIR, "p_vi_bp.png"), plot = p_vi_bp,
