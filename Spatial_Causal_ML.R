@@ -458,6 +458,14 @@ dens_breaks <- pmax(0, make_sd_breaks(Y_bp_density))
 dens_breaks <- unique(dens_breaks)
 pal_bp_dens <- colorBin("YlGn", domain = Y_bp_density, bins = dens_breaks)
 
+legend_css <- "
+  function(el, x) {
+    var style = document.createElement('style');
+    style.innerHTML = '.info.legend { font-size: 9px; line-height: 1.3; padding: 4px 6px; } .info.legend .legend-title { font-size: 9px; }';
+    document.head.appendChild(style);
+  }
+"
+
 map_bp_cate <- leaflet(C_CAs_wgs) %>%
   addProviderTiles("CartoDB.Positron") %>%
   addPolygons(fillColor = ~pal_bp_cate(tau_bp_best), fillOpacity = 0.5,
@@ -465,7 +473,8 @@ map_bp_cate <- leaflet(C_CAs_wgs) %>%
               popup = ~paste0("CATE: ", round(tau_bp_best, 3))) %>%
   addLegend("bottomright", pal = pal_bp_cate, values = ~tau_bp_best,
             labFormat = labelFormat(digits = 2),
-            title = "CATE (std.)", opacity = 0.9)
+            title = "CATE (std.)", opacity = 0.9) %>%
+  htmlwidgets::onRender(legend_css)
 
 map_bp_dens <- leaflet(C_CAs_wgs) %>%
   addProviderTiles("CartoDB.Positron") %>%
@@ -474,7 +483,8 @@ map_bp_dens <- leaflet(C_CAs_wgs) %>%
               popup = ~paste0("BP density (per km²): ", round(Y_bp_density, 1))) %>%
   addLegend("bottomright", pal = pal_bp_dens, values = ~Y_bp_density,
             labFormat = labelFormat(digits = 1),
-            title = "Building permits\nper km² (2015–2019)", opacity = 0.9)
+            title = "Building permits\nper km² (2015–2019)", opacity = 0.9) %>%
+  htmlwidgets::onRender(legend_css)
 
 if (has_leafsync) leafsync::sync(map_bp_cate, map_bp_dens) else {
   print(map_bp_cate)
